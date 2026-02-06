@@ -1,5 +1,5 @@
 # from __future__ import annotations
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, field
 import numpy as np
 from . import circuits, physics
 from typing import Tuple, Any, Type
@@ -125,8 +125,8 @@ class State:
 
     Ndt_neut: float = 0  # DT neutrons produced
     Ndd_neut : float = 0  # DD neutrons produced
-    rl: np.ndarray = np.zeros(N_SHELLS)  # liner radiuses
-    vl: np.ndarray = np.zeros(N_SHELLS)  # liner velocity
+    rl: np.ndarray = field(default_factory=lambda: np.zeros(N_SHELLS))
+    vl: np.ndarray = field(default_factory=lambda: np.zeros(N_SHELLS))
     vg: float = 0  # gas velocity
 
     def flatten(self):
