@@ -11,10 +11,36 @@ __author__ = "Adam Bedel"
 __date__ = "September 16, 2025"
 
 class sim():
+    """
+    Main driver class for the SAMM simulation. 
+
+    This class manages the simulation state, time grid, circuit coupling, 
+    and integration of the governing ODE system describing liner implosion,
+    fuel compression, and energy evolution.
+    """
     def __init__(self, args: objects.args = objects.args.default(), t = np.linspace(0, 150e-9, 1500)):
+        """
+        Initialize a SAMM simulation instance
+
+        Args:
+            args (objects.args): Simulation configuration and physical parameters.
+            t (numpy.ndarray): Time array over which the simulation will be run [s].
+        """
+
         self.recompile(args, t)
     
     def recompile(self, args: objects.args = objects.args.default(), t = np.linspace(0, 250e-9, 2500)):
+        """
+        Reinitialize the simulation with new arguments and/or time grid. 
+
+        This recomputes all derived quantities, resets the state vector, and
+        prepares the simulation for a fresh run.
+
+        Args:
+            args (objects.args): Simulation configuration and physical parameters.
+            t (numpy.ndarray): Time array over which the simulation will be run [s].
+        """
+        
         self.args = args
         A_gas = 2 * (1 - args.f_tritium) + 3 * args.f_tritium
         N_gas_ititial = args.prefill_density * physics.gasVolumeInitial(args) * 1000 * scipyc.N_A / A_gas
@@ -30,6 +56,15 @@ class sim():
         self.t = t
     
     def run(self):
+        """
+        Run the SAMM simulation over the configured time grid.
+
+        Integrates the ODE system without explicit magnetic diffusion
+        and stores the time history of the simulation state.
+
+        Returns:
+            objects.StateSeries: Time series of the simulated state variables.
+        """
         temp, info = odeint(self._ode, self.y.flatten(), self.t, args=(self.args,), full_output=True)
         temp_array = objects.vector_to_dataclass(temp.T, objects.State, type(self.args.circ_init))
         self.solution = objects.stack_states(temp_array)
@@ -39,6 +74,15 @@ class sim():
         return self.solution
     
     def run_with_diffusion(self):
+        """
+        Run the SAMM simulation with explicit magnetic diffusion.
+
+        This method alternates between ODE integration and radial magnetic diffusion
+        updates in the liner.
+
+        Returns:
+            objects.StateSeries: Time series of the simulated state variables.
+        """
         # initial state
         y = self.y.flatten()
         tgrid = self.t
@@ -86,6 +130,21 @@ class sim():
         return self.solution
     
     def step_ode(self, y, t0, t1, args):
+        """
+        Advance the SAMM ODE system by one time step.
+
+        Uses a SciPy initial value problem (IVP) solver to integrate the governing equations
+        between two time points.
+
+        Args:
+            y (numpy.ndarray): State vector at t0.
+            t0 (float): Start time of the step [s].
+            t1 (float): End time of the step [s].
+            args (objects.args): Simulation configuration and physical parameters.
+
+        Returns:
+            numpy.ndarray: State vector at t1.
+        """
         sol = solve_ivp(
             fun=lambda t, y: self._ode(y, t, args),
             t_span=(t0, t1),
@@ -99,6 +158,16 @@ class sim():
 
     
     def plot_powerbalance(self):
+        """
+        Plot a combined liner trajectory and circuit current.
+
+        This plot overlays:
+        - The fuel radius and outer liner radius (filled region)
+        - The circuit current, scaled for visualization
+
+        Returns:
+            matplotlib.axes.Axes: Axes object containing the plot.
+        """
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
         ax.fill_between(self.t * 1e9, self.solution.rg * 1e3, self.solution.rl[:, -1] * 1e3, color="#BE6400", label="Liner Radius [mm]")
@@ -118,6 +187,27 @@ class sim():
 
     
     def plot_trajectory(self, ymax=3, show_vmax=False, curScale='MA', title=None):
+        """
+        Plot the liner and fuel radial trajectories versus time.
+
+        This plot shows:
+        - Fuel radius
+        - Outer liner radius
+        - Liner region shading
+        - Circuit current (scaled for visability)
+
+        Optionally annotes the plot with the dimensionless Pi parameter 
+        and/or the liner kinetic energy at a convergence ratio of 20.
+
+        Args:
+            ymax (float): Maximum y-axis value.
+            show_vmax (bool): If True, include kinetic energy annotation.
+            curScale (str): Current scaling ('MA' or 'kA').
+            title (str or None): Custom plot title. If None, Pi is shown. 
+
+        Returns:
+            matplotlib.axes.Axes: Axes object containing the plot.
+        """
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
 
@@ -152,6 +242,20 @@ class sim():
     @staticmethod
     # def _ode(y_vector: np.ndarray, t: float, *args_tuple: float):
     def _ode(y_vector, t, args):
+        """
+        Compute time derivatives of the SAMM state vector.
+
+        This function defines the coupled ODE system governing liner dynamics, fuel compression,
+        energy balance, and circuit evolution.
+
+        Args:
+            y_vector (numpy.ndarray): State vector.
+            t (float): Current simulation time [s].
+            args (objects.args): Simulation configuration and physical parameters.
+
+        Returns:
+            numpy.ndarray: Time derivative of the state vector
+        """
 
         y: objects.State = objects.vector_to_dataclass(y_vector, objects.State, circ_type=type(args.circ_init))
 
