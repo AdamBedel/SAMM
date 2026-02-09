@@ -17,6 +17,15 @@ CIRCUIT_CLASSES = {
 
 @dataclass
 class ColdCurve:
+    """
+    Parameters for a cold-curve (EOS) pressure model.
+
+    Attributes:
+        a1 (float): Cold-curve coefficient.
+        a2 (float): Cold-curve coefficient.
+        g1 (float): Cold-curve exponent/coefficient.
+        g2 (float): Cold-curve exponent/coefficient.
+    """
     a1 : float
     a2 : float
     g1 : float
@@ -24,6 +33,19 @@ class ColdCurve:
 
 @dataclass
 class Material:
+    """
+    Liner material properties for the SAMM simulation.
+
+    This dataclass groups together material constants used throughout the model,
+    including resistivity, density, and cold-curve parameters.
+
+    Attributes:
+        a (float): Atomic mass or effective atomic weight [g/mol].
+        beta (float): Exponent used in the assumed B_theta radial profile.
+        res (float): Electrical resistivity [Ohm·m].
+        rho (float): Mass density [kg/m^3].
+        cc (ColdCurve): Cold-curve parameter set for compressive pressure modeling.
+    """
     a : float
     beta: float
     res : float
@@ -32,6 +54,12 @@ class Material:
 
     @classmethod
     def Beryllium(cls):
+        """
+        Construct a Material instance with built-in beryllium parameters.
+
+        Returns:
+            Material: Material parameter set for Be, including its cold-curve coefficients.
+        """
         return cls(
             a = 9.01222,
             beta = 3.683,
@@ -47,7 +75,32 @@ class Material:
 
 @dataclass
 class args:
-    """Contains all static arguments to the ODE solver. """
+    """
+    Static simulation configuration parameters for SAMM.
+
+    This dataclass holds constants and runtime configuration used by the ODE system,
+    including initial circuit configuration, geometry, material parameters, preheat,
+    and flags controlling which physics terms are enabled.
+
+    Attributes:
+        aq (float): Artificial viscosity strength or tuning parameter (model-specific).
+        btheta (numpy.ndarray): Azimuthal magnetic field profile.
+        Bz (float): Applied axial magnetic field [T].
+        brems (bool): Whether to include bremsstrahlung power loss.
+        circ_init (circuits.abstractCircuit): Initial circuit object defining the drive.
+        f_tritium (float): Tritium fraction in the fuel (0 to 1).
+        h (float): Liner height [m].
+        mat (Material): Liner material parameters.
+        n_shells (int): Number of discretized liner shells.
+        ph_duration (float): Preheat duration [s].
+        ph_energy (float): Total preheat energy [J].
+        ph_time (float): Time at which preheat is applied [s].
+        prefill_density (float): Gas prefill density [mg/cc] (numerically equal to kg/m^3).
+        prefill_temperature (float): Gas prefill temperature [K].
+        rg (float): Initial gas radius [m].
+        rl0 (float): Initial liner outer radius [m].
+        rrc (float): Return can radius [m].
+    """
     aq : float
     btheta : np.ndarray 
     Bz : float  # axial field [T]
@@ -68,6 +121,12 @@ class args:
 
     @classmethod
     def default(cls):
+        """
+        Construct a default configuration for SAMM.
+
+        Returns:
+            args: Default parameter set used for typical runs.
+        """
         return cls(
             aq = 2,
             btheta = np.ones(N_SHELLS) * -1,
@@ -111,12 +170,44 @@ class args:
     #     )
     
     def flatten(self):
+        """
+        Flatten this args dataclass into a tuple representation.
+
+        This uses `dataclass_to_tuple_with_type` so that circuit subclasses can be
+        round-tripped by including a type tag (class name) for abstractCircuit objects.
+
+        Returns:
+            tuple[Any, ...]: Flattened tuple representation of args.
+        """
         return dataclass_to_tuple_with_type(self)
 
 @dataclass
 class State:
     """Contains the current state of the simulation. All of these variables
     have an evolution equation. """
+    """
+    Dynamic simulation state variables for SAMM.
+
+    These fields define the evolving ODE state: fuel energy and composition,
+    radii/velocities, neutron bookkeeping, and the coupled circuit state.
+
+    Notes:
+        - `rl` and `vl` are arrays of length N_SHELLS.
+        - `circ` is a circuit dataclass instance (subclass of abstractCircuit).
+        - `flatten()` returns a numeric vector suitable for ODE integrators.
+
+    Attributes:
+        circ (circuits.abstractCircuit): Circuit state object.
+        eg (float): Fuel internal energy [J].
+        Nd (float): Deuterium particle count.
+        Nt (float): Tritium particle count.
+        rg (float): Fuel radius [m].
+        Ndt_neut (float): Cumulative DT neutrons produced.
+        Ndd_neut (float): Cumulative DD neutrons produced.
+        rl (numpy.ndarray): Liner shell interface radii [m], shape (N_SHELLS,).
+        vl (numpy.ndarray): Liner shell interface velocities [m/s], shape (N_SHELLS,).
+        vg (float): Fuel radial velocity [m/s].
+    """
     circ: circuits.abstractCircuit
     eg: float
     Nd: float
@@ -130,9 +221,31 @@ class State:
     vg: float = 0  # gas velocity
 
     def flatten(self):
+        """
+        Flatten the State dataclass into a 1-D numeric vector.
+
+        Returns:
+            numpy.ndarray: Flattened state vector suitable for ODE integration.
+        """
         return toVector(self)
 
 def toTuple(dataclass):
+    """
+    Flatten a (possibly nested) dataclass into a Python tuple.
+
+    This version treats nested dataclasses recursively and appends scalar fields
+    directly.
+
+    Warning:
+        In the code as written, nested dataclasses call `toVector(value)` instead
+        of `toTuple(value)`. If intentional, document why; if not, this is a bug.
+
+    Args:
+        dataclass (Any): Dataclass instance to flatten.
+
+    Returns:
+        tuple: Flattened tuple of values.
+    """
     flat = []
 
     for f in fields(dataclass):
@@ -146,6 +259,25 @@ def toTuple(dataclass):
 
 @dataclass
 class StateSeries:
+    """
+    Time-series container for a simulation run.
+
+    Each field is the stacked value of the corresponding `State` field across time.
+    Scalars become 1-D arrays of length N (timesteps). Array fields such as `rl` and
+    `vl` become 2-D arrays of shape (N, N_SHELLS).
+
+    Attributes:
+        circ (numpy.ndarray): Array of circuit objects (dtype=object), length N.
+        eg (numpy.ndarray): Fuel energy over time [J], shape (N,).
+        Nd (numpy.ndarray): Deuterium count over time, shape (N,).
+        Nt (numpy.ndarray): Tritium count over time, shape (N,).
+        Ndd_neut (numpy.ndarray): Cumulative DD neutrons, shape (N,).
+        Ndt_neut (numpy.ndarray): Cumulative DT neutrons, shape (N,).
+        rg (numpy.ndarray): Fuel radius over time [m], shape (N,).
+        rl (numpy.ndarray): Liner radii over time [m], shape (N, N_SHELLS).
+        vl (numpy.ndarray): Liner velocities over time [m/s], shape (N, N_SHELLS).
+        vg (numpy.ndarray): Fuel velocity over time [m/s], shape (N,).
+    """
     circ: np.ndarray
     eg: np.ndarray
     Nd: np.ndarray
@@ -163,6 +295,15 @@ def stack_states(states):
     into a StateSeries where each field is stacked
     over time.  rl and vl become 2D.
     """
+    """
+    Stack a sequence of State objects into a StateSeries.
+
+    Args:
+        states (Sequence[State]): Iterable of State objects of length N.
+
+    Returns:
+        StateSeries: Time-series container with each field stacked over time.
+    """
     N = len(states)
 
     return StateSeries(
@@ -179,6 +320,18 @@ def stack_states(states):
     )
 
 def toVector(dataclass):
+    """
+    Flatten a (possibly nested) dataclass into a 1-D numeric numpy array.
+
+    Nested dataclasses are flattened recursively. Numpy array fields are expanded
+    element-by-element into scalars (e.g., rl and vl of length N_SHELLS).
+
+    Args:
+        dataclass (Any): Dataclass instance to flatten.
+
+    Returns:
+        numpy.ndarray: 1-D float array containing the flattened values.
+    """
     flat = []
 
     for f in fields(dataclass):
@@ -201,7 +354,27 @@ def vector_to_dataclass(arr: np.ndarray, cls: Any, circ_type: Type) -> Any:
     Reconstruct a dataclass from a 1-D array OR a 2-D array (time × state).
     Any numpy array fields are assumed to have length N_SHELLS.
     """
+    """
+    Reconstruct a dataclass instance from a flattened numeric vector.
 
+    Supports:
+      - 1-D input representing a single state vector
+      - 2-D input where each column is one state vector (state_dim × time)
+
+    Conventions:
+      - Nested dataclass fields are filled recursively.
+      - Fields annotated as numpy.ndarray are assumed to have length N_SHELLS.
+      - Circuit fields are reconstructed using `circ_type` so the correct circuit
+        subclass is instantiated.
+
+    Args:
+        arr (numpy.ndarray): Flattened state vector (1-D) or stacked state matrix (2-D).
+        cls (Any): Dataclass type to reconstruct (e.g., State).
+        circ_type (Type): Concrete circuit class to use for the `circ` field.
+
+    Returns:
+        Any: Reconstructed dataclass instance (or numpy array of instances if arr is 2-D).
+    """
     # If we were passed a matrix of many states, map over columns
     if arr.ndim == 2:
         return np.array([
@@ -243,6 +416,19 @@ def vector_to_dataclass(arr: np.ndarray, cls: Any, circ_type: Type) -> Any:
 
 
 def tuple_to_dataclass(data: Tuple[float, ...], cls: Any) -> Any:
+    """
+    Reconstruct a dataclass instance from a flattened tuple.
+
+    This is a tuple-based counterpart to `vector_to_dataclass`, but it does not
+    handle numpy array expansion or circuit subclass tagging.
+
+    Args:
+        data (tuple[float, ...]): Flattened tuple representation.
+        cls (Any): Dataclass type to reconstruct.
+
+    Returns:
+        Any: Reconstructed dataclass instance.
+    """
     def _fill(cls: Any, data: Tuple[float, ...], idx: int) -> Tuple[Any, int]:
         kwargs = {}
         for f in fields(cls):
@@ -261,6 +447,24 @@ def tuple_to_dataclass(data: Tuple[float, ...], cls: Any) -> Any:
 def dataclass_to_tuple_with_type(obj: Any) -> Tuple[Any, ...]:
     """
     Flatten dataclass including type tag for subclasses of abstractCircuit.
+    """
+    """
+    Flatten a dataclass to a tuple, including a type tag for circuit subclasses.
+
+    If `obj` is an instance of `circuits.abstractCircuit`, the first element of
+    the tuple is the class name (e.g., "LCCircuit") so that deserialization can
+    reconstruct the correct concrete circuit class.
+
+    For non-circuit dataclasses, fields are flattened recursively without a type tag.
+
+    Args:
+        obj (Any): Dataclass instance to flatten.
+
+    Returns:
+        tuple[Any, ...]: Flattened tuple representation (with optional type tag).
+
+    Raises:
+        TypeError: If `obj` is not a dataclass instance or circuit instance.
     """
     if isinstance(obj, circuits.abstractCircuit):
         # Include class name as first element
@@ -289,6 +493,26 @@ def dataclass_to_tuple_with_type(obj: Any) -> Tuple[Any, ...]:
 
 
 def tuple_to_dataclass_with_type(data: Tuple[Any, ...], cls: Type) -> Any:
+    """
+    Reconstruct a dataclass instance from a flattened tuple with circuit type tags.
+
+    This is the inverse of `dataclass_to_tuple_with_type`. When encountering a field
+    whose type is a subclass of `circuits.abstractCircuit`, the function expects the
+    next element in the tuple to be a string class name (the type tag). It then uses
+    `CIRCUIT_CLASSES` to map that name to a concrete circuit class for reconstruction.
+
+    Args:
+        data (tuple[Any, ...]): Flattened tuple representation, possibly including
+            circuit type tags.
+        cls (Type): Dataclass type to reconstruct (e.g., args or State).
+
+    Returns:
+        Any: Reconstructed dataclass instance.
+
+    Raises:
+        ValueError: If a circuit type tag is not recognized.
+    """
+    #why
     def _fill(cls: Type, data: Tuple[Any, ...], idx: int) -> Tuple[Any, int]:
         kwargs = {}
         for f in fields(cls):
