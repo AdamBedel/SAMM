@@ -512,7 +512,6 @@ def tuple_to_dataclass_with_type(data: Tuple[Any, ...], cls: Type) -> Any:
     Raises:
         ValueError: If a circuit type tag is not recognized.
     """
-    #why
     def _fill(cls: Type, data: Tuple[Any, ...], idx: int) -> Tuple[Any, int]:
         kwargs = {}
         for f in fields(cls):

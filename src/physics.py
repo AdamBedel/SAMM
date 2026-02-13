@@ -158,77 +158,96 @@ def diffusion_nonuniform(x, phi0, tmax, D=1, right=1, C=0.99):
     
     return x, t, phi
 
-def diffusion_nonuniform_eta(x, phi0, tmax, T_profile, eta_of_T, right=1, C=0.99):
+import numpy as np
+import scipy.constants as scipyc
 
-    mu_0 = scipyc.mu_0
+def diffusion_nonuniform_eta(x, phi0, tmax, T_profile, eta_of_T, right=1.0, C=0.99):
+    """
+    Same as diffusion_nonuniform, but with spatially varying diffusivity from a table:
 
-    x = np.asarray(x, float)
-    phi0 = np.asarray(phi0, float)
+        D(r) = eta(T(r)) / mu0
+
+    The PDE solved is:
+        dphi/dt = (1/r) d/dr ( r * D(r) * dphi/dr )
+
+    Args:
+        x (np.ndarray): radial grid, length N (monotonic).
+        phi0 (np.ndarray): initial phi(x,0), length N.
+        tmax (float): total integration time.
+        T_profile (np.ndarray): temperature at each node, length N (or broadcastable to N).
+        eta_of_T (callable): function returning resistivity eta [ohm-m] for T [K].
+        right (float): Dirichlet BC at outer boundary: phi[-1] = right.
+        C (float): stability factor (<1).
+
+    Returns:
+        (x, t, phi): phi has shape (Nt, N).
+    """
+
+    x = np.asarray(x, dtype=float)
+    phi0 = np.asarray(phi0, dtype=float)
+    T_profile = np.asarray(T_profile, dtype=float)
 
     N = len(x)
-    dx = np.diff(x)
-    dx_im1 = x[1:-1] - x[:-2]
-    dx_i   = x[2:]   - x[1:-1]
+    if phi0.shape[0] != N:
+        raise ValueError(f"phi0 length {phi0.shape[0]} must match x length {N}")
+    if T_profile.shape[0] != N:
+        raise ValueError(f"T_profile length {T_profile.shape[0]} must match x length {N}")
 
-    # Precompute radii at half nodes (same as before)
-    r_iphalf = 0.5*(x[2:]   + x[1:-1])
-    r_imhalf = 0.5*(x[1:-1] + x[:-2])
-    delta_r_cent = r_iphalf - r_imhalf
+    #D from table
+    mu0 = scipyc.mu_0
+    eta_n = eta_of_T(T_profile)          # ohm-m, shape (N,)
+    D_n = eta_n / mu0                    # m^2/s, shape (N,)
 
-    if np.ndim(T_profile) == 1:
-        T0 = np.asarray(T_profile, float)
-    else:
-        T0 = np.asarray(T_profile[0], float)
+    # local dx
+    dx = np.diff(x)                      # length N-1
 
-    eta0 = np.array(T0.size, eta_of_T(T_profile[0]))               # ohm-m
-    D0 = eta0 / mu_0                    # m^2/s
-    Dmax0 = np.max(D0)
+    # worst case diffusivity
+    Dmax = np.max(D_n)
+    if Dmax <= 0:
+        raise ValueError("Non-positive diffusivity encountered (check eta_of_T and units).")
 
-    dt = C * np.min(dx)**2 / (2 * Dmax0)
+    dt = C * np.min(dx)**2 / (2 * Dmax)
     Nt = int(np.ceil(tmax / dt)) + 1
-    t = np.linspace(0, tmax, Nt)
+    t = np.linspace(0.0, tmax, Nt)
 
-    phi = np.zeros((Nt, N))
+    # storage
+    phi = np.zeros((Nt, N), dtype=float)
     phi[0, :] = phi0
 
+    # precompute geometry factors
+    dx_im1 = x[1:-1] - x[:-2]           # length N-2
+    dx_i   = x[2:]   - x[1:-1]          # length N-2
+
+    r_iphalf = 0.5*(x[2:]   + x[1:-1])  # length N-2
+    r_imhalf = 0.5*(x[1:-1] + x[:-2])   # length N-2
+    delta_r_cent = r_iphalf - r_imhalf  # length N-2
+
+    #face diffusivities
+    # D_{i+1/2} between nodes i and i+1
+    D_iphalf = 2*D_n[1:-1]*D_n[2:]  / (D_n[1:-1] + D_n[2:]  + 1e-300)
+    D_imhalf = 2*D_n[1:-1]*D_n[:-2] / (D_n[1:-1] + D_n[:-2] + 1e-300)
+
+    # time stepping
     for n in range(Nt - 1):
         u = phi[n]
         u_new = u.copy()
 
-        # --- get temperature at this time level ---
-        if np.ndim(T_profile) == 1:
-            Tn = np.asarray(T_profile, float)
-        else:
-            # If T_profile was computed on its own time grid, you may need mapping.
-            # Minimal assumption: it already matches Nt.
-            Tn = np.asarray(T_profile[n], float)
-
-        # --- node diffusivity ---
-        eta_n = eta_of_T(Tn)           # ohm-m at nodes
-        D_n = eta_n / mu_0              # m^2/s at nodes
-
-        # OPTIONAL: update dt each step for stability (minimal extra change)
-        Dmax = np.max(D_n)
-        dt_n = C * np.min(dx)**2 / (2 * Dmax)
-
-        # --- face diffusivities (harmonic mean is best for diffusion) ---
-        D_iphalf = 2*D_n[1:-1]*D_n[2:]  / (D_n[1:-1] + D_n[2:]  + 1e-300)
-        D_imhalf = 2*D_n[1:-1]*D_n[:-2] / (D_n[1:-1] + D_n[:-2] + 1e-300)
-
-        # --- fluxes: F = r * D * dphi/dr ---
+        # fluxes at half-nodes now include D:
+        # F = r * D * dphi/dr
         F_ip = r_iphalf * D_iphalf * (u[2:]   - u[1:-1]) / dx_i
         F_im = r_imhalf * D_imhalf * (u[1:-1] - u[:-2])  / dx_im1
 
-        # --- cylindrical update (same form, just no global D) ---
-        u_new[1:-1] = u[1:-1] + dt_n * (F_ip - F_im) / (x[1:-1] * delta_r_cent)
+        # cylindrical update
+        u_new[1:-1] = u[1:-1] + dt * (F_ip - F_im) / (x[1:-1] * delta_r_cent)
 
-        # BCs (unchanged)
-        u_new[0]  = u_new[1]
-        u_new[-1] = right
+        # boundary conditions
+        u_new[0]  = u_new[1]   # reflecting / zero gradient
+        u_new[-1] = right      # Dirichlet
 
         phi[n+1] = u_new
 
     return x, t, phi
+
 
 
 def gasPressure(y, args): 

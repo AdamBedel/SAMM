@@ -13,15 +13,18 @@ eta_disc = temp_res["resistivity [10e-8ohm-m]"].values
 #Convert units
 eta_disc = eta_disc * 1e-8
 
-def resistivity_Be(T):
-    eta_interp = interp1d(
+eta_interp = interp1d(
         T_disc,
         eta_disc,
         kind='cubic',
         bounds_error=False,
         fill_value="extrapolate"
     )
-    if T > 1200:
-        return eta_interp(T)
-    return eta_interp(T)
+
+def eta_of_T(T):
+    T = np.asarray(T, dtype=float)
+    Tcap = np.minimum(T, 1200.0)
+    return eta_interp(Tcap)
+
+
 
