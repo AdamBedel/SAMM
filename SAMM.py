@@ -5,7 +5,7 @@ import scipy.constants as scipyc
 from scipy.integrate import odeint, solve_ivp
 
 
-from src import objects, circuits, physics
+from src import objects, circuits, physics, eos
 
 __author__ = "Adam Bedel"
 __date__ = "September 16, 2025"
@@ -128,6 +128,92 @@ class sim():
         self.V = np.array([self.solution.circ[s].V for s in range(self.t.shape[0])])
 
         return self.solution
+    
+    def run_with_diffusion_eta(self):
+        """
+        Run the SAMM simulation with explicit magnetic diffusion.
+        Diffuses ONLY across liner slices (state_obj.rl).
+        """
+        y = self.y.flatten()
+        tgrid = self.t
+        Nt = len(tgrid)
+
+        # Build initial state_obj so we know liner grid size immediately
+        state_obj = objects.vector_to_dataclass(y, objects.State, type(self.args.circ_init))
+
+        # Liner grid for diffusion: ONLY liner slices (interfaces in your state)
+        x_liner = state_obj.rl                  # shape (N_SHELLS,)
+
+        # initialize B on liner-slice grid
+        self.B = np.zeros(x_liner.size)         # shape (N_SHELLS,)
+
+        # ---- store interface-sized btheta history (N_SHELLS+1) ----
+        self.B_history = np.zeros((Nt, self.B.size + 1))   # 121 if N_SHELLS=120
+
+        # initial interface profile
+        btheta_iface = np.zeros(self.B.size + 1)
+        btheta_iface[1:] = self.B
+        btheta_iface[0]  = btheta_iface[1]  # reflecting at inner boundary
+        self.B_history[0, :] = btheta_iface.copy()
+        # -----------------------------------------------------------
+
+        # storage for flattened state history
+        Y = np.zeros((Nt, len(y)))
+        Y[0] = y
+
+        for n in range(Nt - 1):
+            t0 = tgrid[n]
+            t1 = tgrid[n + 1]
+            dt = t1 - t0
+
+            # (1) Magnetic diffusion update on liner grid only
+            if n > 0:
+                state_obj = objects.vector_to_dataclass(y, objects.State, type(self.args.circ_init))
+                x_liner = state_obj.rl
+
+                # constant temperature test profile on liner slices
+                T_profile = np.full(x_liner.size, 300.0)
+
+                # Right boundary Btheta at outer surface (Ampere law)
+                rightBC = scipyc.mu_0 * state_obj.circ.I / (2 * scipyc.pi * x_liner[-1])
+
+                # diffuse starting from current B profile for duration dt
+                _, _, Bsol = physics.diffusion_nonuniform_eta(
+                    x_liner,          # x
+                    self.B,           # phi0 (N_SHELLS,)
+                    dt,               # tmax
+                    T_profile,        # T_profile (N_SHELLS,)
+                    eos.eta_of_T,     # eta_of_T
+                    right=rightBC,    # Dirichlet at outer radius
+                    C=0.99
+                )
+
+                # take final profile (still N_SHELLS)
+                self.B = Bsol[-1]
+
+            # ---- FIX: convert slice B (N) -> interface btheta (N+1) for the ODE ----
+            btheta_iface = np.zeros(self.B.size + 1)  # (N_SHELLS+1,)
+            btheta_iface[1:] = self.B
+            btheta_iface[0]  = btheta_iface[1]        # reflecting / avoid mismatch at inner boundary
+
+            # store and pass to ODE
+            self.B_history[n + 1, :] = btheta_iface.copy()
+            self.args.btheta = btheta_iface
+            # ----------------------------------------------------------------------
+
+            # (2) Advance SAMM ODE
+            y = self.step_ode(y, t0, t1, self.args)
+            Y[n + 1] = y
+
+        # convert back into dataclass structure
+        temp_array = objects.vector_to_dataclass(Y.T, objects.State, type(self.args.circ_init))
+        self.solution = objects.stack_states(temp_array)
+        self.I = np.array([self.solution.circ[s].I for s in range(self.t.shape[0])])
+        self.V = np.array([self.solution.circ[s].V for s in range(self.t.shape[0])])
+
+        return self.solution
+
+
     
     def step_ode(self, y, t0, t1, args):
         """

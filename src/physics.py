@@ -158,6 +158,78 @@ def diffusion_nonuniform(x, phi0, tmax, D=1, right=1, C=0.99):
     
     return x, t, phi
 
+def diffusion_nonuniform_eta(x, phi0, tmax, T_profile, eta_of_T, right=1, C=0.99):
+
+    mu_0 = scipyc.mu_0
+
+    x = np.asarray(x, float)
+    phi0 = np.asarray(phi0, float)
+
+    N = len(x)
+    dx = np.diff(x)
+    dx_im1 = x[1:-1] - x[:-2]
+    dx_i   = x[2:]   - x[1:-1]
+
+    # Precompute radii at half nodes (same as before)
+    r_iphalf = 0.5*(x[2:]   + x[1:-1])
+    r_imhalf = 0.5*(x[1:-1] + x[:-2])
+    delta_r_cent = r_iphalf - r_imhalf
+
+    if np.ndim(T_profile) == 1:
+        T0 = np.asarray(T_profile, float)
+    else:
+        T0 = np.asarray(T_profile[0], float)
+
+    eta0 = np.array(T0.size, eta_of_T(T_profile[0]))               # ohm-m
+    D0 = eta0 / mu_0                    # m^2/s
+    Dmax0 = np.max(D0)
+
+    dt = C * np.min(dx)**2 / (2 * Dmax0)
+    Nt = int(np.ceil(tmax / dt)) + 1
+    t = np.linspace(0, tmax, Nt)
+
+    phi = np.zeros((Nt, N))
+    phi[0, :] = phi0
+
+    for n in range(Nt - 1):
+        u = phi[n]
+        u_new = u.copy()
+
+        # --- get temperature at this time level ---
+        if np.ndim(T_profile) == 1:
+            Tn = np.asarray(T_profile, float)
+        else:
+            # If T_profile was computed on its own time grid, you may need mapping.
+            # Minimal assumption: it already matches Nt.
+            Tn = np.asarray(T_profile[n], float)
+
+        # --- node diffusivity ---
+        eta_n = eta_of_T(Tn)           # ohm-m at nodes
+        D_n = eta_n / mu_0              # m^2/s at nodes
+
+        # OPTIONAL: update dt each step for stability (minimal extra change)
+        Dmax = np.max(D_n)
+        dt_n = C * np.min(dx)**2 / (2 * Dmax)
+
+        # --- face diffusivities (harmonic mean is best for diffusion) ---
+        D_iphalf = 2*D_n[1:-1]*D_n[2:]  / (D_n[1:-1] + D_n[2:]  + 1e-300)
+        D_imhalf = 2*D_n[1:-1]*D_n[:-2] / (D_n[1:-1] + D_n[:-2] + 1e-300)
+
+        # --- fluxes: F = r * D * dphi/dr ---
+        F_ip = r_iphalf * D_iphalf * (u[2:]   - u[1:-1]) / dx_i
+        F_im = r_imhalf * D_imhalf * (u[1:-1] - u[:-2])  / dx_im1
+
+        # --- cylindrical update (same form, just no global D) ---
+        u_new[1:-1] = u[1:-1] + dt_n * (F_ip - F_im) / (x[1:-1] * delta_r_cent)
+
+        # BCs (unchanged)
+        u_new[0]  = u_new[1]
+        u_new[-1] = right
+
+        phi[n+1] = u_new
+
+    return x, t, phi
+
 
 def gasPressure(y, args): 
     """
